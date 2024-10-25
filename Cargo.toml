@@ -2,6 +2,8 @@
 name = "http-app"
 version = "0.0.1"
 edition = "2021"
+description = "Wrapper around hyper to help with making a http server"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
