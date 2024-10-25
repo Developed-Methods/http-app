@@ -39,6 +39,7 @@ pub struct HttpServerMetrics {
 pub struct HttpServerSettings {
     pub max_parallel: Option<usize>,
     pub parse_cf_header: bool,
+    pub keep_alive: bool,
 }
 
 impl Default for HttpServerSettings {
@@ -46,6 +47,7 @@ impl Default for HttpServerSettings {
         Self {
             max_parallel: Some(200),
             parse_cf_header: false,
+            keep_alive: true,
         }
     }
 }
@@ -106,7 +108,11 @@ impl<H: HttpServerHandler> HttpServer<H> {
                     .as_ref()
                     .map(|v| DurationInc::new(&v.tcp_duration_ms));
 
-                let result = Builder::new(TokioExecutor::new())
+                let mut builder = Builder::new(TokioExecutor::new());
+                builder.http1()
+                    .keep_alive(self.settings.keep_alive);
+
+                let result = builder
                     .serve_connection(
                         TokioIo::new(stream),
                         service_fn(|req| {
