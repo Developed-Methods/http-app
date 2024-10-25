@@ -40,6 +40,7 @@ pub struct HttpServerSettings {
     pub max_parallel: Option<usize>,
     pub parse_cf_header: bool,
     pub keep_alive: bool,
+    pub with_upgrades: bool,
 }
 
 impl Default for HttpServerSettings {
@@ -48,6 +49,7 @@ impl Default for HttpServerSettings {
             max_parallel: Some(200),
             parse_cf_header: false,
             keep_alive: true,
+            with_upgrades: false,
         }
     }
 }
@@ -112,38 +114,39 @@ impl<H: HttpServerHandler> HttpServer<H> {
                 builder.http1()
                     .keep_alive(self.settings.keep_alive);
 
-                let result = builder
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        service_fn(|req| {
-                            let handler = handler.clone();
+                let handle = |req: Request<Incoming>| {
+                    let handler = handler.clone();
 
-                            if let Some(metrics) = &metrics {
-                                metrics.http_requests.inc()
-                            };
-                            
-                            let _http_session_metric =
-                                metrics.as_ref().map(|v| ActiveGauge::new(&v.http_sessions));
+                    if let Some(metrics) = &metrics {
+                        metrics.http_requests.inc()
+                    };
 
-                            let source_ip = if parse_cf_header {
-                                let remote_addr = req
-                                    .headers()
-                                    .get("CF-Connecting-IP")
-                                    .and_then(|ip| ip.to_str().ok())
-                                    .and_then(|ip| ip.parse::<IpAddr>().ok())
-                                    .unwrap_or_else(|| addr.ip());
-                                remote_addr
-                            } else {
-                                addr.ip()
-                            };
+                    let _http_session_metric =
+                        metrics.as_ref().map(|v| ActiveGauge::new(&v.http_sessions));
 
-                            async move {
-                                let res = handler.handle_request(source_ip, req).await;
-                                Ok::<_, Infallible>(res)
-                            }
-                        }),
-                    )
-                    .await;
+                    let source_ip = if parse_cf_header {
+                        let remote_addr = req
+                            .headers()
+                            .get("CF-Connecting-IP")
+                            .and_then(|ip| ip.to_str().ok())
+                            .and_then(|ip| ip.parse::<IpAddr>().ok())
+                            .unwrap_or_else(|| addr.ip());
+                        remote_addr
+                    } else {
+                        addr.ip()
+                    };
+
+                    async move {
+                        let res = handler.handle_request(source_ip, req).await;
+                        Ok::<_, Infallible>(res)
+                    }
+                };
+
+                let result = if self.settings.with_upgrades {
+                    builder.serve_connection_with_upgrades(TokioIo::new(stream), service_fn(handle)).await
+                } else {
+                    builder.serve_connection(TokioIo::new(stream), service_fn(handle)).await
+                };
 
                 if let Err(e) = result {
                     tracing::error!(?e, %addr, "failed to serve request");
