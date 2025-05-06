@@ -2,14 +2,18 @@ use std::{
     convert::Infallible, error::Error, future::Future, net::{IpAddr, SocketAddr}, sync::Arc, time::Instant
 };
 
-pub use http_body_util::{BodyExt, Full};
-use hyper::{body::{Body, Incoming}, service::service_fn, Request, Response};
+use hyper::{body::{Body, Incoming}, service::service_fn};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
 };
 use prometheus::{IntCounter, IntGauge};
 use tokio::{net::TcpListener, sync::Semaphore};
+
+/* re-export for downstream */
+pub use bytes;
+pub use http_body_util::{BodyExt, Full};
+pub use hyper::{Request, Response, body, StatusCode, header, Error as HyperError};
 
 pub trait HttpServerHandler: Sync + Send + 'static {
     type Body: Body<Data: Send + Sync, Error: Into<Box<dyn Error + Send + Sync>>> + Send;
@@ -38,18 +42,28 @@ pub struct HttpServerMetrics {
 
 pub struct HttpServerSettings {
     pub max_parallel: Option<usize>,
-    pub parse_cf_header: bool,
+    pub true_ip_header: Option<String>,
     pub keep_alive: bool,
     pub with_upgrades: bool,
+    #[cfg(feature = "tls")]
+    pub tls: Option<HttpTls>,
+}
+
+#[cfg(feature = "tls")]
+pub enum HttpTls {
+    WithBytes { cert: Vec<u8>, key: Vec<u8> },
+    WithPemPath { path: String },
 }
 
 impl Default for HttpServerSettings {
     fn default() -> Self {
         Self {
             max_parallel: Some(200),
-            parse_cf_header: false,
+            true_ip_header: None,
             keep_alive: true,
             with_upgrades: false,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 }
@@ -68,6 +82,18 @@ impl<H: HttpServerHandler> HttpServer<H> {
     }
 
     pub async fn start(self, listen_addr: SocketAddr) -> std::io::Result<()> {
+        #[cfg(feature = "tls")]
+        let tls = Arc::new(if let Some(tls) = &self.settings.tls {
+            tls_friend::install_crypto();
+
+            let acceptor = match tls {
+                HttpTls::WithBytes { cert, key } => tls_friend::tls_setup::TlsSetup::build_server(cert, key),
+                HttpTls::WithPemPath { path } => tls_friend::tls_setup::TlsSetup::load_server(&path).await,
+            }?.into_acceptor()?;
+
+            Some(acceptor)
+        } else { None });
+
         tracing::info!(%listen_addr, "starting http server");
 
         let metrics = self.metrics;
@@ -77,7 +103,7 @@ impl<H: HttpServerHandler> HttpServer<H> {
             .max_parallel
             .map(|v| Arc::new(Semaphore::new(v)));
 
-        let parse_cf_header = self.settings.parse_cf_header;
+        let true_ip_header = Arc::new(self.settings.true_ip_header);
 
         loop {
             let (stream, addr) = match tcp_listener.accept().await {
@@ -91,6 +117,10 @@ impl<H: HttpServerHandler> HttpServer<H> {
             let sem = sem.clone();
             let metrics = metrics.clone();
             let handler = self.handler.clone();
+            let true_ip_header = true_ip_header.clone();
+
+            #[cfg(feature = "tls")]
+            let tls = tls.clone();
 
             tokio::spawn(async move {
                 let _parallel_guard = match sem {
@@ -124,14 +154,13 @@ impl<H: HttpServerHandler> HttpServer<H> {
                     let _http_session_metric =
                         metrics.as_ref().map(|v| ActiveGauge::new(&v.http_sessions));
 
-                    let source_ip = if parse_cf_header {
-                        let remote_addr = req
+                    let source_ip = if let Some(true_ip_header) = &*true_ip_header {
+                        req
                             .headers()
-                            .get("CF-Connecting-IP")
+                            .get(true_ip_header)
                             .and_then(|ip| ip.to_str().ok())
                             .and_then(|ip| ip.parse::<IpAddr>().ok())
-                            .unwrap_or_else(|| addr.ip());
-                        remote_addr
+                            .unwrap_or_else(|| addr.ip())
                     } else {
                         addr.ip()
                     };
@@ -140,6 +169,20 @@ impl<H: HttpServerHandler> HttpServer<H> {
                         let res = handler.handle_request(source_ip, req).await;
                         Ok::<_, Infallible>(res)
                     }
+                };
+
+                #[cfg(feature = "tls")]
+                let stream = match &*tls {
+                    Some(tls) => tls_friend::tls_streams::ServerStream::TlsStream({
+                        match tls.accept(stream).await {
+                            Ok(v) => v,
+                            Err(error) => {
+                                tracing::error!(?error, "failed to accept new tls stream");
+                                return;
+                            }
+                        }
+                    }),
+                    None => tls_friend::tls_streams::ServerStream::TcpStream(stream),
                 };
 
                 let result = if self.settings.with_upgrades {
