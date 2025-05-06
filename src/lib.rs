@@ -87,7 +87,7 @@ impl<H: HttpServerHandler> HttpServer<H> {
             tls_friend::install_crypto();
 
             let acceptor = match tls {
-                HttpTls::WithBytes { cert, key } => tls_friend::tls_setup::TlsSetup::build_server(cert, key),
+                HttpTls::WithBytes { cert, key } => tls_friend::tls_setup::TlsSetup::build_server(key, cert),
                 HttpTls::WithPemPath { path } => tls_friend::tls_setup::TlsSetup::load_server(&path).await,
             }?.into_acceptor()?;
 
