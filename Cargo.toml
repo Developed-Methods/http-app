@@ -1,6 +1,6 @@
 [package]
 name = "http-app"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Wrapper around hyper to help with making a http server"
 repository = "https://github.com/Developed-Methods/http-app"

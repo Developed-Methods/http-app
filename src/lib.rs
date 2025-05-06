@@ -13,7 +13,7 @@ use tokio::{net::TcpListener, sync::Semaphore};
 /* re-export for downstream */
 pub use bytes;
 pub use http_body_util::{BodyExt, Full};
-pub use hyper::{Request, Response, body, StatusCode, header, Error as HyperError};
+pub use hyper::{self, Request, Response, body, StatusCode, header, Error as HyperError};
 
 pub trait HttpServerHandler: Sync + Send + 'static {
     type Body: Body<Data: Send + Sync, Error: Into<Box<dyn Error + Send + Sync>>> + Send;
