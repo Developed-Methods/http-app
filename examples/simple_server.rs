@@ -21,6 +21,7 @@ impl HttpServerHandler for Server {
 
 #[tokio::main]
 async fn main() {
+    pkg_details::init!();
     let server = HttpServer::new(Arc::new(Server), HttpServerSettings::default());
 
     let metrics_server = PromMetricsServer::new(Default::default());

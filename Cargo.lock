@@ -72,9 +72,9 @@ dependencies = [
 
 [[package]]
 name = "backtrace"
-version = "0.3.74"
+version = "0.3.75"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d82cb332cdfaed17ae235a638438ac4d4839913cc2af585c3c6746e8f8bee1a"
+checksum = "6806a6321ec58106fea15becdad98371e28d92ccbc7c8f1b3b6dd724fe8f1002"
 dependencies = [
  "addr2line",
  "cfg-if",
@@ -327,13 +327,14 @@ dependencies = [
 
 [[package]]
 name = "http-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arc-metrics",
  "bytes",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "pkg-details",
  "tls-friend",
  "tokio",
  "tracing",
@@ -594,9 +595,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pkg-details"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30164d370a6477681fe41c3f5a3d0edc1233a189ef6eb180a07e364bdfa4f042"
+checksum = "401e8a230f09a2062bf6e3bb456c130db97ba1441d5366c45943cd4dfabae0ff"
 
 [[package]]
 name = "prettyplease"
@@ -735,9 +736,12 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "917ce264624a4b4db1c364dcc35bfca9ded014d0a958cd47ad3e960e988ea51c"
+checksum = "229a4a4c221013e7e1f1a043678c5cc39fe5171437c88fb47151a21e6f5b5c79"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "rustls-webpki"
@@ -816,9 +820,9 @@ dependencies = [
 
 [[package]]
 name = "tls-friend"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b18db62f5a62f9fbf418223a1b5a8729c30e095c7d0a8c991659b33b21cac795"
+checksum = "8603b27569b7e6748fa9dc11be63f48ce501d879965adf203ef97313b431bde9"
 dependencies = [
  "rustls",
  "rustls-pemfile",

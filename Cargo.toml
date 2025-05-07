@@ -1,6 +1,6 @@
 [package]
 name = "http-app"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Wrapper around hyper to help with making a http server"
 repository = "https://github.com/Developed-Methods/http-app"
@@ -20,6 +20,7 @@ tls-friend = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+pkg-details = "0.1"
 
 [features]
 default = ["metrics-server"]
