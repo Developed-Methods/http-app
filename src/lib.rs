@@ -2,13 +2,16 @@ use std::{
     convert::Infallible, error::Error, future::Future, net::{IpAddr, SocketAddr}, sync::Arc, time::Instant
 };
 
+use arc_metrics::{helpers::{ActiveGauge, DurationIncMs, RegisterableMetric}, IntCounter, IntGauge};
 use hyper::{body::{Body, Incoming}, service::service_fn};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
 };
-use prometheus::{IntCounter, IntGauge};
 use tokio::{net::TcpListener, sync::Semaphore};
+
+#[cfg(feature = "metrics-server")]
+pub mod prom_metrics_server;
 
 /* re-export for downstream */
 pub use bytes;
@@ -28,16 +31,55 @@ pub trait HttpServerHandler: Sync + Send + 'static {
 pub struct HttpServer<H: HttpServerHandler> {
     handler: Arc<H>,
     settings: HttpServerSettings,
-    metrics: Option<Arc<HttpServerMetrics>>,
+    metrics: Arc<HttpServerMetrics>,
 }
 
+#[derive(Default)]
 pub struct HttpServerMetrics {
-    pub tcp_accepts: IntCounter,
     pub tcp_waiting: IntGauge,
     pub tcp_sessions: IntGauge,
+
+    pub tcp_blocked_waiting_count: IntCounter,
+    pub tcp_blocked_waiting_duration_ms: IntCounter,
+
+    pub tcp_accepts: IntCounter,
     pub tcp_duration_ms: IntCounter,
+
     pub http_requests: IntCounter,
     pub http_sessions: IntGauge,
+
+    pub tcp_accept_errors: IntCounter,
+    pub tcp_accept_errors_too_many_files: IntCounter,
+    pub true_ip_parse_errors: IntCounter,
+    pub http_serve_errors: IntCounter,
+    #[cfg(feature = "tls")]
+    pub tls_accept_errors: IntCounter,
+}
+
+impl RegisterableMetric for HttpServerMetrics {
+    fn register(&'static self, register: &mut arc_metrics::RegisterAction) {
+        register.gauge("connections", &self.tcp_waiting)
+            .attr("status", "waiting");
+        register.gauge("connections", &self.tcp_sessions)
+            .attr("status", "active");
+
+        register.count("blocked_waiting_count", &self.tcp_blocked_waiting_count);
+        register.count("blocked_waiting_duration_ms", &self.tcp_blocked_waiting_duration_ms);
+
+        register.count("tcp_count", &self.tcp_accepts);
+        register.count("tcp_duration_ms", &self.tcp_duration_ms);
+
+        register.count("http_request_count", &self.http_requests);
+        register.gauge("http_sessions", &self.http_sessions);
+
+        register.count("accept_error", &self.tcp_accept_errors_too_many_files).attr("reason", "too_many_files");
+        register.count("accept_error", &self.tcp_accept_errors).attr("reason", "other");
+
+        register.count("errors", &self.true_ip_parse_errors).attr("type", "true_ip_parse");
+        register.count("errors", &self.http_serve_errors).attr("type", "http_serve");
+        #[cfg(feature = "tls")]
+        register.count("errors", &self.tls_accept_errors).attr("type", "tls_accept");
+    }
 }
 
 pub struct HttpServerSettings {
@@ -73,12 +115,12 @@ impl<H: HttpServerHandler> HttpServer<H> {
         HttpServer {
             handler,
             settings,
-            metrics: None,
+            metrics: Arc::new(HttpServerMetrics::default()),
         }
     }
 
-    pub fn set_metrics(&mut self, metrics: HttpServerMetrics) {
-        self.metrics.replace(Arc::new(metrics));
+    pub fn get_metrics(&self) -> &Arc<HttpServerMetrics> {
+        &self.metrics
     }
 
     pub async fn start(self, listen_addr: SocketAddr) -> std::io::Result<()> {
@@ -108,8 +150,19 @@ impl<H: HttpServerHandler> HttpServer<H> {
         loop {
             let (stream, addr) = match tcp_listener.accept().await {
                 Ok(x) => x,
-                Err(e) => {
-                    eprintln!("failed to accept connection: {e}");
+                Err(error) => {
+                    let counter = 'counter: {
+                        #[cfg(target_family = "unix")]
+                        {
+                            if let Some(24) = error.raw_os_error() {
+                                break 'counter &metrics.tcp_accept_errors_too_many_files;
+                            }
+                        }
+                        &metrics.tcp_accept_errors
+                    };
+                    counter.inc();
+
+                    tracing::error!(?error, "tcp failed to accept");
                     continue;
                 }
             };
@@ -123,44 +176,50 @@ impl<H: HttpServerHandler> HttpServer<H> {
             let tls = tls.clone();
 
             tokio::spawn(async move {
-                let _parallel_guard = match sem {
-                    Some(v) => {
-                        let _wait_metric =
-                            metrics.as_ref().map(|v| ActiveGauge::new(&v.tcp_waiting));
-                        Some(v.acquire_owned().await)
+                let _parallel_guard = 'block: {
+                    let Some(sem) = sem.clone() else { break 'block None };
+
+                    /* try non blocking first so we only update metrics if we're block */
+                    if let Ok(guard) = Arc::clone(&sem).try_acquire_owned() {
+                        break 'block Some(guard);
                     }
-                    None => None,
+
+                    metrics.tcp_blocked_waiting_count.inc();
+                    let _waiting_count = ActiveGauge::new(&metrics, |m| &m.tcp_waiting);
+                    let _waiting_duration = DurationIncMs::new(&metrics, |m| &m.tcp_blocked_waiting_duration_ms);
+                    let guard = sem.acquire_owned().await.expect("Semaphore closed?");
+
+                    Some(guard)
                 };
 
-                if let Some(metrics) = &metrics {
-                    metrics.tcp_accepts.inc()
-                };
-                let _session_metric = metrics.as_ref().map(|v| ActiveGauge::new(&v.tcp_sessions));
-                let _duration_metric = metrics
-                    .as_ref()
-                    .map(|v| DurationInc::new(&v.tcp_duration_ms));
+                metrics.tcp_accepts.inc();
+
+                let _session_metric = ActiveGauge::new(&metrics, |m| &m.tcp_sessions);
+                let _duration_metric = DurationIncMs::new(&metrics, |m| &m.tcp_duration_ms);
 
                 let mut builder = Builder::new(TokioExecutor::new());
-                builder.http1()
-                    .keep_alive(self.settings.keep_alive);
+                builder.http1().keep_alive(self.settings.keep_alive);
 
                 let handle = |req: Request<Incoming>| {
                     let handler = handler.clone();
 
-                    if let Some(metrics) = &metrics {
-                        metrics.http_requests.inc()
-                    };
-
-                    let _http_session_metric =
-                        metrics.as_ref().map(|v| ActiveGauge::new(&v.http_sessions));
+                    metrics.http_requests.inc();
+                    let _http_session_metric = ActiveGauge::new(&metrics, |m| &m.http_sessions);
 
                     let source_ip = if let Some(true_ip_header) = &*true_ip_header {
-                        req
+                        let true_ip_opt = req
                             .headers()
                             .get(true_ip_header)
                             .and_then(|ip| ip.to_str().ok())
-                            .and_then(|ip| ip.parse::<IpAddr>().ok())
-                            .unwrap_or_else(|| addr.ip())
+                            .and_then(|ip| ip.parse::<IpAddr>().ok());
+
+                        match true_ip_opt {
+                            Some(v) => v,
+                            None => {
+                                metrics.true_ip_parse_errors.inc();
+                                addr.ip()
+                            }
+                        }
                     } else {
                         addr.ip()
                     };
@@ -178,6 +237,7 @@ impl<H: HttpServerHandler> HttpServer<H> {
                             Ok(v) => v,
                             Err(error) => {
                                 tracing::error!(?error, "failed to accept new tls stream");
+                                metrics.tls_accept_errors.inc();
                                 return;
                             }
                         }
@@ -193,47 +253,10 @@ impl<H: HttpServerHandler> HttpServer<H> {
 
                 if let Err(e) = result {
                     tracing::error!(?e, %addr, "failed to serve request");
+                    metrics.http_serve_errors.inc();
                 }
             });
         }
     }
 }
 
-struct ActiveGauge(IntGauge);
-
-impl ActiveGauge {
-    pub fn new(gauge: &IntGauge) -> Self {
-        let gauge = gauge.clone();
-        gauge.inc();
-        ActiveGauge(gauge)
-    }
-}
-
-impl Drop for ActiveGauge {
-    fn drop(&mut self) {
-        self.0.dec();
-    }
-}
-
-struct DurationInc {
-    start: Instant,
-    count: IntCounter,
-}
-
-impl DurationInc {
-    pub fn new(count: &IntCounter) -> Self {
-        let count = count.clone();
-
-        DurationInc {
-            start: Instant::now(),
-            count,
-        }
-    }
-}
-
-impl Drop for DurationInc {
-    fn drop(&mut self) {
-        let elapsed = self.start.elapsed().as_millis() as u64;
-        self.count.inc_by(elapsed as _);
-    }
-}
