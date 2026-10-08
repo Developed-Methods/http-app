@@ -1,6 +1,6 @@
 [package]
 name = "http-app"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Wrapper around hyper to help with making a http server"
 repository = "https://github.com/Developed-Methods/http-app"
@@ -9,7 +9,7 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1", features = ["net", "rt"] }
+tokio = { version = "1", features = ["net", "rt", "time"] }
 hyper = "1.5"
 hyper-util = { version = "0.1", features = ["full"] }
 tracing = "0.1"
